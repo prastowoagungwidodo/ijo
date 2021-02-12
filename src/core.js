@@ -20,6 +20,7 @@ class Core {
         /** The core log
          * @type {Logger} */
         this.log = new Logger();
+        this.LOG_LEVELS = ["info", "debug", "trace"];
         /** The api server.
          * @type {ApiServer} */
         this.apiServer = new ApiServer();
@@ -44,7 +45,8 @@ class Core {
             api: {port: 8080, auth: {secret: nanoid(32), expiresIn: "5d"}},
             daemon: {port: 8081},
             database: {type: "json", path: "./data/"},
-            plugins: {path: "./plugins/"}
+            plugins: {path: "./plugins/"},
+            logLevel: "info"
         }});
     }
 
@@ -61,9 +63,10 @@ class Core {
      * @returns {Promise} A promise that resolves after initialization.
      */
     async initialize() {
-        // TODO: Add control over log level using cli args
-        await this.log.initialize({folder: path.join(this.root, "./logs"), name: "core", logLevel: 2});
         await this.config.load().catch(e => {throw e});
+        let level = this.LOG_LEVELS.indexOf(this.config.get("logLevel"));
+        if (level < 0) throw Error(`Log level of '${this.config.get("logLevel")}' does not exist`);
+        await this.log.initialize({folder: path.join(this.root, "./logs"), name: "core", logLevel: level});
         this.apiServer.initialize(this.log);
         this.daemonServer.initialize({daemons: this.daemons});
         await this.plugins.initialize(this.config.get("plugins"), {root: this.root}, this).catch(e => {throw e});
