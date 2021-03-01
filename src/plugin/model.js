@@ -14,13 +14,16 @@ class Plugin {
      * @param {String} data.author {@link plugin.Plugin#author}
      * @param {String} path The path to the plugin. 
      */
-    constructor({name, dependencies, index, author} = {}, path) {
+    constructor({ name, dependencies, npmDependencies, index, author, log } = {}, path) {
         /** The name of the plugin. 
          * @type {String} */
         this.name = name;
         /** The arrry of plugin names this plugin depends on. 
          * @type {Array.<String>} */
         this.dependencies = dependencies;
+        /** The npm packages this plugin depends on. 
+         * @type {Array.<String>} */
+        this.npmDependencies = npmDependencies;
         /** The path to the index file, relative to the path of the plugin.
          * @type {String} */
         this.index = index;
@@ -36,6 +39,14 @@ class Plugin {
         /** If the plugin has been enabled. 
          * @type {boolean} */
         this.enabled = false;
+        /** If the plugins dependencies are installed (npm)
+         * @type {boolean} */
+        this.npmReady = false;
+        /** If the plugin's dependencies are available (plugins)
+         * @type {boolean} */
+        this.ready = false;
+
+        this.log = log;
     }
 
     /**
@@ -45,13 +56,13 @@ class Plugin {
      * @returns {Promise} A promise that resolves when the plugin is loaded.
      */
     async load(core) {
-        if (this.loaded) return;
+        if (this.loaded || !this.npmReady || !this.ready) return;
 
         try {
             const indexPath = nodePath.join(this.path, this.index);
 
             this.loadedIndex = require(indexPath);
-            await this.execute("load", [core]).catch(e => {throw e});
+            await this.execute("load", [core]).catch(e => { throw e });
             this.loaded = true;
         }
         catch (err) {
@@ -66,7 +77,7 @@ class Plugin {
     async enable() {
         if (this.enabled || !this.loaded) return;
 
-        await this.execute("enable").catch(e => {throw e});
+        await this.execute("enable").catch(e => { throw e });
         this.enabled = true;
     }
 
@@ -77,7 +88,7 @@ class Plugin {
     async disable() {
         if (!this.enabled || !this.loaded) return;
 
-        await this.execute("disable").catch(e => {throw e});
+        await this.execute("disable").catch(e => { throw e });
         this.enabled = false;
     }
 
@@ -88,7 +99,7 @@ class Plugin {
     async unload() {
         if (this.enabled || !this.loaded) return;
 
-        await this.execute("unload").catch(e => {throw e});
+        await this.execute("unload").catch(e => { throw e });
         this.loaded = false;
     }
 
@@ -112,11 +123,13 @@ class Plugin {
         if (!this.canExecute(event)) return Promise.resolve();
 
         try {
+            this.log.trace(`Running event '${event}' for plugin '${this.name}'`, "plugins");
             const promise = this.loadedIndex[event](...args);
+            this.log.trace(`Completed event '${event}' for plugin '${this.name}'`, "plugins");
 
             if (!(promise instanceof Promise)) return Promise.resolve(promise);
 
-            return promise.catch(e => {throw e});
+            return promise.catch(e => { throw e });
         }
         catch (err) {
             throw Error(`There was an error while executing the event ${event} for ${this.name}: ${err.message}`);
@@ -128,7 +141,12 @@ class Plugin {
      * @param {Array<Plugin>} plugins The array of possible dependencies.
      */
     addTrueDependencies(plugins) {
-        this.trueDependencies = this.getTrueDependencies(plugins);
+        try {
+            this.trueDependencies = this.getTrueDependencies(plugins);
+            this.ready = true;
+        } catch (err) {
+            this.log.error(`Failed to locate dependency '${err.message}' for plugin '${this.name}'`, "plugins");
+        }
     }
 
     /**
@@ -142,7 +160,13 @@ class Plugin {
 
         for (const dependency of this.dependencies) {
             trueDependencies.push(dependency);
-            trueDependencies.push(...plugins.find(plugin => plugin.name === dependency).getTrueDependencies(plugins));
+            try {
+                trueDependencies.push(
+                    ...plugins.find(plugin => plugin.name === dependency).getTrueDependencies(plugins)
+                );
+            } catch {
+                throw Error(dependency);
+            }
         }
 
         return trueDependencies;

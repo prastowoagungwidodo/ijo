@@ -29,11 +29,14 @@ class UserApi extends ApiModel {
             !await req.isValidKey(res, "password", "string")
         ) {return}
 
-        // TODO: Check if username has already been used.
+        // Check if username is taken
+        if (users.collection.data.filter(user => user.username == data.username)[0]) {
+            return res.sendError({message: "Username is not available", code: 409});
+        }
 
         const user = users.create({username: data.username, password: data.password});
         await users.collection.addOne(user).catch(e => res.sendError({message: e.message, code: 500}));
-        this.log.debug(`New user created: ${user.id}`, "user-api");
+        this.log.debug(`New user created: '${user.id}'`, "user-api");
 
         res.send({data: {message: "Created"}, code: 201});
     }

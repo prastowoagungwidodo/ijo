@@ -1,6 +1,12 @@
+const childProcess = require("child_process");
+const util = require("util");
+const fs = require("fs");
 const nodePath = require("path");
-const {ConfigFile, FSUtils} = require("ijo-utils");
+const { ConfigFile, FSUtils } = require("ijo-utils");
 const Plugin = require("./model");
+
+const exec = util.promisify(childProcess.exec);
+const writeFile = util.promisify(fs.writeFile);
 
 /**
  * This the class managing all plugins added to this instance of IJO.
@@ -23,32 +29,34 @@ class Plugins {
      */
     async findPlugins(path) {
         this.log.trace("Finding plugins", "plugins");
-        if (!FSUtils.exists(path) || !(await FSUtils.isFolder(path).catch(e => {throw e}))) {
+        if (!FSUtils.exists(path) || !(await FSUtils.isFolder(path).catch(e => { throw e }))) {
             this.log.debug("No plugins folder found; creating one instead", "plugins");
-            await FSUtils.createFolder(path).catch(e => {throw e});
+            await FSUtils.createFolder(path).catch(e => { throw e });
             this.log.trace("Created folder for plugins", "plugins");
         }
 
-        const folders = await FSUtils.readdir(path).catch(e => {throw e});
+        const folders = await FSUtils.readdir(path).catch(e => { throw e });
         const plugins = [];
 
         for (const folder of folders) {
             const pluginPath = nodePath.join(path, folder);
             const configPath = nodePath.join(pluginPath, "plugin.json");
 
-            if (!FSUtils.exists(configPath) || !(await FSUtils.isFile(configPath).catch(e => {throw e}))) {
+            if (!FSUtils.exists(configPath) || !(await FSUtils.isFile(configPath).catch(e => { throw e }))) {
                 this.log.fatal(`No plugin configuration file found for ${configPath}`, "plugins");
                 throw Error(`There is no plugin configuration file for ${configPath}.`);
             }
 
             const config = new ConfigFile(configPath);
-            await config.load().catch(e => {throw e});
+            await config.load().catch(e => { throw e });
 
             const plugin = new Plugin({
                 name: config.get("name"),
                 dependencies: config.get("dependencies") || [],
+                npmDependencies: config.get("npmDependencies") ?? {},
                 author: config.get("author"),
-                index: config.get("index")
+                index: config.get("index"),
+                log: this.log
             }, pluginPath);
 
             if (plugin.name === undefined) throw Error(`The plugin configuration at ${configPath} has no name.`);
@@ -81,21 +89,29 @@ class Plugins {
      * @param {Core} core IJO's core. Use with care!
      * @returns {Promise} A promise that is resolved when the plugins have been initialized.
      */
-    async initialize({path} = {}, {root} = {}, core) {
+    async initialize({ path } = {}, { root } = {}, core) {
         this.log = core.log;
         this.path = nodePath.join(root, path);
 
         // Check if folder exists and create it if it doesn't.
-        const plugins = await this.findPlugins(this.path).catch(e => {throw e});
-        
-        // Add the true dependencies, meaning all recursively found children dependencies are included.
+        const plugins = await this.findPlugins(this.path).catch(e => { throw e });
+
+        // Add npm dependencies for each plugin.
+        for (let i = 0; i < plugins.length; i++) {
+            const plugin = plugins[i];
+            if (Object.keys(plugin.npmDependencies).length != 0) {
+                await this.npmInstall(plugin);
+            }
+        }
+
+        // Add the true plugin dependencies, meaning all recursively found children dependencies are included.
         plugins.forEach(plugin => plugin.addTrueDependencies(plugins));
 
         // Sorts all the plugins depending on which plugins depends on eachother. This enables them to be loaded in the 
         // correct order.
         this.plugins.push(...plugins.sort((a, b) => this.compareDependencies(a, b)));
 
-        await this.load(core).catch(e => {throw e});
+        await this.load(core).catch(e => { throw e });
         this.log.info(`Loaded ${this.plugins.length} plugins`, "plugins");
     }
 
@@ -140,9 +156,7 @@ class Plugins {
      */
     async execute(event, args = []) {
         for (const plugin of this.plugins) {
-            this.log.trace(`Running event '${event}' for plugin '${plugin.name}'`, "plugins");
-            await plugin[event](...args).catch(e => {throw e});
-            this.log.trace(`Completed event '${event}' for plugin '${plugin.name}'`, "plugins");
+            await plugin[event](...args).catch(e => { throw e });
         }
     }
 
@@ -165,8 +179,33 @@ class Plugins {
 
         if (aDependencies.includes(b.name)) return 1;
         else if (bDependencies.includes(a.name)) return -1;
-        
+
         return 0;
+    }
+
+    /**
+     * Install the dependencies of a given plugin
+     * @param {Plugin} plugin The plugin to prepare
+     */
+    async npmInstall(plugin) {
+        // update `package.json`
+        const configPath = nodePath.join(plugin.path, "package.json");
+        const config = {
+            name: plugin.name.toLowerCase().replace(" ", "-"),
+            author: plugin.author,
+            dependencies: plugin.npmDependencies
+        };
+        await writeFile(configPath, JSON.stringify(config, { space: "  " }));
+
+        // get dependencies with `npm install`
+        this.log.trace(`Installing dependencies for '${plugin.name}'`, "plugins");
+        try {
+            await exec("npm install", { cwd: plugin.path, stdio: "ignore" });
+            plugin.npmReady = true;
+        } catch (err) {
+            this.log.fatal(`Failed to install dependencies for '${plugin.name}'`, "plugins");
+            process.exit(1);
+        }
     }
 }
 
